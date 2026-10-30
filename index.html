@@ -316,8 +316,10 @@ function percentile(values, p) {
    1. Smooth with a 3x3 average, so camera noise and JPEG grain are not counted as detail.
    2. Apply the Laplacian: (up + down + left + right) - 4 * center. Edges give big values.
    3. Cut the picture into up to 8 x 8 blocks and measure how much the values vary in each block.
-   4. Take the 90th percentile of the block values. A photo with a sharp subject and a soft
-      background still scores high, but a picture that is blurry everywhere scores low. */
+   4. Keep only the central blocks (the outer ring is dropped), then take the 90th percentile.
+      The main subject is usually near the center. So a photo with a sharp subject and a soft
+      background scores high, while a photo whose subject is blurry scores low, even if the
+      table or wall around it has sharp texture. */
 function sharpnessScore(gray, w, h) {
   if (w < 8 || h < 8) return 0;
 
@@ -350,8 +352,11 @@ function sharpnessScore(gray, w, h) {
   const blocks = Math.max(1, Math.min(8, Math.floor(Math.min(lw, lh) / 16)));
   const bw = Math.floor(lw / blocks), bh = Math.floor(lh / blocks);
   const variances = [];
-  for (let by = 0; by < blocks; by++) {
-    for (let bx = 0; bx < blocks; bx++) {
+  // With 4 or more blocks per side, skip the outer ring of blocks
+  const from = blocks >= 4 ? 1 : 0;
+  const to = blocks >= 4 ? blocks - 1 : blocks;
+  for (let by = from; by < to; by++) {
+    for (let bx = from; bx < to; bx++) {
       let sum = 0, sumSq = 0, count = 0;
       for (let y = by * bh; y < (by + 1) * bh; y++) {
         for (let x = bx * bw; x < (bx + 1) * bw; x++) {
@@ -366,7 +371,7 @@ function sharpnessScore(gray, w, h) {
     }
   }
 
-  // Step 4: the 90th percentile of the block values is the score
+  // Step 4: the 90th percentile of the central block values is the score
   return percentile(variances, 90);
 }
 
@@ -461,13 +466,27 @@ function analyzeFile(file) {
         const scale = Math.min(1, ANALYSIS_MAX_SIDE / Math.max(width, height));
         const cw = Math.max(1, Math.round(width * scale));
         const ch = Math.max(1, Math.round(height * scale));
+        // Shrink in steps of one half. Each step averages 2 x 2 pixels, which removes grain
+        // cleanly. One big jump can keep grain as fake detail and make a blurry photo look sharp.
+        let source = img, sourceW = width, sourceH = height;
+        while (sourceW > cw * 2 && sourceH > ch * 2) {
+          const half = document.createElement("canvas");
+          half.width = Math.floor(sourceW / 2);
+          half.height = Math.floor(sourceH / 2);
+          const hctx = half.getContext("2d");
+          hctx.imageSmoothingQuality = "high";
+          hctx.drawImage(source, 0, 0, half.width, half.height);
+          source = half; sourceW = half.width; sourceH = half.height;
+        }
+
         const canvas = document.createElement("canvas");
         canvas.width = cw;
         canvas.height = ch;
         const ctx = canvas.getContext("2d", { willReadFrequently: true });
+        ctx.imageSmoothingQuality = "high";
         ctx.fillStyle = "#fff";            // transparent PNGs get a white background
         ctx.fillRect(0, 0, cw, ch);
-        ctx.drawImage(img, 0, 0, cw, ch);
+        ctx.drawImage(source, 0, 0, cw, ch);
 
         // Convert to gray values (brightness only)
         const data = ctx.getImageData(0, 0, cw, ch).data;
