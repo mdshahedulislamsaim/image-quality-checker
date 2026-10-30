@@ -1,0 +1,751 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Image Classification and Quality Checker</title>
+<style>
+  /* ---------- Design tokens (light by default, dark variants below) ---------- */
+  :root {
+    --bg: #f4f6f8;
+    --surface: #ffffff;
+    --surface-2: #eef1f4;
+    --ink: #1b2430;
+    --ink-soft: #5a6676;
+    --line: #d9dee5;
+    --accent: #0f766e;
+    --accent-ink: #ffffff;
+    --danger: #b42318;
+    --bar: #0f766e;
+
+    /* Quality colors */
+    --q-clear: #15803d;
+    --q-blurry: #a16207;
+    --q-low: #b42318;
+
+    color-scheme: light;
+    box-sizing: border-box;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #12171d; --surface: #1b222b; --surface-2: #232c37;
+      --ink: #e8edf3; --ink-soft: #9aa7b6; --line: #303b48;
+      --accent: #2dd4bf; --accent-ink: #06201d; --danger: #ff8a7a; --bar: #2dd4bf;
+      --q-clear: #4ade80; --q-blurry: #facc15; --q-low: #ff8a7a;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #12171d; --surface: #1b222b; --surface-2: #232c37;
+    --ink: #e8edf3; --ink-soft: #9aa7b6; --line: #303b48;
+    --accent: #2dd4bf; --accent-ink: #06201d; --danger: #ff8a7a; --bar: #2dd4bf;
+    --q-clear: #4ade80; --q-blurry: #facc15; --q-low: #ff8a7a;
+    color-scheme: dark;
+  }
+
+  /* ---------- Base ---------- */
+  html { scroll-padding-top: env(safe-area-inset-top, 0px); }
+  *, *::before, *::after { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  .page { max-width: 1280px; margin: 0 auto; padding: 20px 16px 40px; }
+  header.top h1 { margin: 0 0 4px; font-size: 1.5rem; letter-spacing: -0.01em; }
+  header.top p { margin: 0 0 16px; color: var(--ink-soft); max-width: 75ch; }
+
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 14px;
+  }
+  .panel + .panel { margin-top: 16px; }
+  .panel h2 { margin: 0 0 10px; font-size: 1rem; }
+
+  /* ---------- Controls ---------- */
+  button, select {
+    font: inherit; color: var(--ink);
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: 8px; padding: 7px 12px; cursor: pointer;
+  }
+  button:hover, select:hover { border-color: var(--ink-soft); }
+  button:focus-visible, select:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 2px;
+  }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+  button.danger { color: var(--danger); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  input[type="file"] { display: none; }
+  .hint { color: var(--ink-soft); font-size: 0.88rem; margin: 0 0 10px; }
+  .btn-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
+  .inline-label { display: flex; align-items: center; gap: 6px; color: var(--ink-soft); font-size: 0.9rem; }
+
+  /* ---------- Upload area ---------- */
+  .dropzone {
+    display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between;
+    padding: 18px; margin-bottom: 16px;
+    background: var(--surface); border: 2px dashed var(--line); border-radius: 10px;
+  }
+  .dropzone.dragover { border-color: var(--accent); background: var(--surface-2); }
+  .dropzone p { margin: 0; color: var(--ink-soft); }
+  .status { min-height: 1.4em; margin: -6px 0 12px; font-size: 0.9rem; color: var(--ink-soft); }
+  .status.error { color: var(--danger); }
+
+  /* ---------- Layout: image grid + summary sidebar ---------- */
+  .layout { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 16px; align-items: start; }
+  aside.side { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 12px); }
+  @media (max-width: 900px) {
+    .layout { grid-template-columns: minmax(0, 1fr); }
+    aside.side { position: static; order: -1; } /* summary first on small screens */
+  }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+  .empty {
+    grid-column: 1 / -1; text-align: center; color: var(--ink-soft);
+    padding: 40px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface);
+  }
+
+  /* ---------- Image card ---------- */
+  .card {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+    overflow: hidden; display: flex; flex-direction: column;
+  }
+  .thumb {
+    display: block; width: 100%; aspect-ratio: 4 / 3; padding: 0; border: 0; border-radius: 0;
+    background: var(--surface-2); cursor: zoom-in;
+  }
+  .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .card-body { padding: 10px; display: grid; gap: 8px; }
+  .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .meta { font-size: 0.82rem; color: var(--ink-soft); font-variant-numeric: tabular-nums; }
+  .field { display: grid; gap: 3px; font-size: 0.82rem; color: var(--ink-soft); }
+  .field select { width: 100%; color: var(--ink); }
+  .note { font-size: 0.78rem; color: var(--ink-soft); }
+
+  /* The quality badge text always shows the label, so color is not the only signal */
+  .badge {
+    display: inline-block; font-size: 0.78rem; font-weight: 700; padding: 1px 8px; border-radius: 99px;
+    border: 1px solid currentColor;
+  }
+  .card[data-q="Clear"] .badge { color: var(--q-clear); }
+  .card[data-q="Blurry"] .badge { color: var(--q-blurry); }
+  .card[data-q="Low Resolution"] .badge { color: var(--q-low); }
+  .card-actions { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .card-actions button { padding: 4px 10px; font-size: 0.85rem; }
+
+  /* ---------- Summary ---------- */
+  .total { font-size: 1.6rem; font-weight: 700; line-height: 1.1; }
+  .total small { font-size: 0.9rem; font-weight: 400; color: var(--ink-soft); }
+  .bars { display: grid; gap: 6px; margin: 6px 0 14px; }
+  .bar-row { display: grid; grid-template-columns: 110px 1fr 28px; gap: 8px; align-items: center; font-size: 0.88rem; }
+  .bar-row .count { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+  .track { height: 8px; background: var(--surface-2); border-radius: 99px; overflow: hidden; }
+  .fill { height: 100%; width: 0; background: var(--bar); transition: width 0.2s; }
+  .fill.q-Clear { background: var(--q-clear); }
+  .fill.q-Blurry { background: var(--q-blurry); }
+  .fill.q-LowResolution { background: var(--q-low); }
+  .fill.unassigned { background: var(--ink-soft); }
+  h3.sub { margin: 10px 0 0; font-size: 0.9rem; }
+
+  /* ---------- Export ---------- */
+  details summary { cursor: pointer; color: var(--ink-soft); font-size: 0.9rem; }
+  pre.preview {
+    margin: 8px 0 0; padding: 10px; max-height: 240px; overflow: auto;
+    background: var(--surface-2); border-radius: 8px;
+    font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+
+  /* ---------- Full-size viewer ---------- */
+  dialog {
+    max-width: min(96vw, 1100px); width: 100%; padding: 12px;
+    background: var(--surface); color: var(--ink);
+    border: 1px solid var(--line); border-radius: 12px;
+  }
+  dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
+  .viewer-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 8px; }
+  .viewer-head strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  dialog img { display: block; max-width: 100%; max-height: 78vh; margin: 0 auto; }
+
+  .disclaimer { margin-top: 16px; color: var(--ink-soft); font-size: 0.85rem; max-width: 80ch; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header class="top">
+    <h1>Image Classification and Quality Checker</h1>
+    <p>Upload images, give each one a category, check its quality, and export your labels as CSV or JSON. Everything runs in your browser. No images are uploaded anywhere.</p>
+  </header>
+
+  <!-- ===================== Upload ===================== -->
+  <div class="dropzone" id="dropzone">
+    <div>
+      <button type="button" class="primary" id="uploadBtn">Choose images</button>
+      <input type="file" id="fileInput" accept="image/*" multiple>
+    </div>
+    <p>or drop several images here</p>
+  </div>
+  <p class="status" id="status" role="status"></p>
+
+  <div class="layout">
+
+    <!-- ===================== Image grid ===================== -->
+    <main>
+      <div class="grid" id="grid">
+        <div class="empty" id="emptyState">No images yet. Choose or drop some images to start.</div>
+      </div>
+    </main>
+
+    <!-- ===================== Summary + export ===================== -->
+    <aside class="side">
+      <section class="panel" aria-label="Summary">
+        <h2>Summary</h2>
+        <div class="total"><span id="totalCount">0</span> <small>images</small></div>
+
+        <h3 class="sub">Categories</h3>
+        <div class="bars" id="catBars"></div>
+
+        <h3 class="sub">Quality</h3>
+        <div class="bars" id="qualBars"></div>
+
+        <p class="hint" style="margin:0">Quality is suggested from image size and sharpness. It is a rough guide, so check each image and correct it if needed.</p>
+      </section>
+
+      <section class="panel" aria-label="Export">
+        <h2>Export</h2>
+        <div class="btn-row">
+          <label class="inline-label">Format
+            <select id="exportFormat" aria-label="Export format">
+              <option value="csv">CSV</option>
+              <option value="json">JSON</option>
+            </select>
+          </label>
+        </div>
+        <div class="btn-row">
+          <button type="button" class="primary" id="downloadBtn" disabled>Download</button>
+          <button type="button" id="copyBtn" disabled>Copy</button>
+          <button type="button" class="danger" id="clearBtn" disabled>Clear all</button>
+        </div>
+        <p class="hint" id="exportStatus" style="margin:0 0 8px" role="status"></p>
+        <details>
+          <summary>Preview</summary>
+          <pre class="preview" id="preview"></pre>
+        </details>
+      </section>
+    </aside>
+  </div>
+
+  <p class="disclaimer">This is an educational practice tool. The automatic quality suggestion is a simple estimate, not a certified quality check.</p>
+</div>
+
+<!-- Full-size viewer -->
+<dialog id="viewer" aria-label="Image viewer">
+  <div class="viewer-head">
+    <strong id="viewerTitle"></strong>
+    <button type="button" id="viewerClose">Close</button>
+  </div>
+  <img id="viewerImg" alt="">
+</dialog>
+
+<script>
+/* =====================================================================
+   Image Classification and Quality Checker
+   - No backend, no API key. Images never leave the browser.
+   - Each image gets a category (chosen by the user) and a quality label
+     (suggested by simple rules, then editable by the user).
+   ===================================================================== */
+
+/* ---------- Settings ---------- */
+const CATEGORIES = ["Person", "Animal", "Vehicle", "Food", "Other"];
+const QUALITIES  = ["Clear", "Blurry", "Low Resolution"];
+
+/* Rules for the automatic quality suggestion */
+const LOW_RES_MIN_SIDE   = 400;     // shorter side below this (px) = Low Resolution
+const LOW_RES_MIN_PIXELS = 250000;  // fewer pixels than this (about 0.25 MP) = Low Resolution
+const BLUR_LIMIT         = 50;      // sharpness score below this = Blurry
+const ANALYSIS_MAX_SIDE  = 512;     // images are shrunk to this size before measuring sharpness
+
+/* ---------- App state ---------- */
+const state = {
+  items: [],       // [{ id, file, name, size, width, height, sharpness, thumb, category, quality, qualitySource, el }]
+  nextId: 1,
+  seen: new Set()  // used to skip the same file added twice
+};
+
+/* ---------- Element shortcuts ---------- */
+const $ = (id) => document.getElementById(id);
+const els = {
+  dropzone: $("dropzone"), uploadBtn: $("uploadBtn"), fileInput: $("fileInput"), status: $("status"),
+  grid: $("grid"), emptyState: $("emptyState"),
+  totalCount: $("totalCount"), catBars: $("catBars"), qualBars: $("qualBars"),
+  exportFormat: $("exportFormat"), downloadBtn: $("downloadBtn"), copyBtn: $("copyBtn"), clearBtn: $("clearBtn"),
+  exportStatus: $("exportStatus"), preview: $("preview"),
+  viewer: $("viewer"), viewerTitle: $("viewerTitle"), viewerImg: $("viewerImg"), viewerClose: $("viewerClose")
+};
+
+/* =====================================================================
+   PURE FUNCTIONS (no screen access, easy to test)
+   ===================================================================== */
+/* PURE-START */
+
+/* Sharpness score: the variance of the Laplacian.
+   For each pixel: (up + down + left + right) - 4 * center.
+   Sharp images have strong edges, so the values vary a lot (high score).
+   Blurry images are smooth, so the values stay near zero (low score). */
+function laplacianVariance(gray, w, h) {
+  if (w < 3 || h < 3) return 0;
+  let sum = 0, sumSq = 0, count = 0;
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const i = y * w + x;
+      const v = gray[i - 1] + gray[i + 1] + gray[i - w] + gray[i + w] - 4 * gray[i];
+      sum += v;
+      sumSq += v * v;
+      count++;
+    }
+  }
+  const mean = sum / count;
+  return sumSq / count - mean * mean;
+}
+
+/* Suggest a quality label from the ORIGINAL size and the sharpness score.
+   Size is checked first, because sharpness is not reliable on tiny images. */
+function suggestQuality(width, height, sharpness) {
+  if (Math.min(width, height) < LOW_RES_MIN_SIDE || width * height < LOW_RES_MIN_PIXELS) return "Low Resolution";
+  if (sharpness < BLUR_LIMIT) return "Blurry";
+  return "Clear";
+}
+
+/* Count items by a field. Returns an object like { Person: 2, Animal: 1 } */
+function countBy(items, field, keys, emptyKey) {
+  const counts = {};
+  keys.forEach((k) => { counts[k] = 0; });
+  if (emptyKey) counts[emptyKey] = 0;
+  items.forEach((it) => {
+    const value = it[field] || emptyKey;
+    counts[value] = (counts[value] || 0) + 1;
+  });
+  return counts;
+}
+
+/* Prepare one CSV cell: quote it, double any quotes inside, and block spreadsheet formulas */
+function csvCell(value) {
+  let s = String(value === null || value === undefined ? "" : value);
+  if (/^[=+\-@\t\r]/.test(s)) s = "'" + s; // a leading = + - @ could run as a formula in Excel
+  return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+/* One plain row per image, used by both CSV and JSON */
+function exportRows(items) {
+  return items.map((it) => ({
+    fileName: it.name,
+    width: it.width,
+    height: it.height,
+    fileSizeKB: Math.round(it.size / 1024),
+    category: it.category || "Unassigned",
+    quality: it.quality,
+    qualitySource: it.qualitySource === "auto" ? "auto-suggested" : "set by user",
+    sharpnessScore: Math.round(it.sharpness * 10) / 10
+  }));
+}
+
+function buildCsv(items) {
+  const header = ["file_name", "width_px", "height_px", "file_size_kb", "category", "quality", "quality_source", "sharpness_score"];
+  const lines = [header.join(",")];
+  exportRows(items).forEach((r) => {
+    lines.push([r.fileName, r.width, r.height, r.fileSizeKB, r.category, r.quality, r.qualitySource, r.sharpnessScore]
+      .map(csvCell).join(","));
+  });
+  return lines.join("\r\n");
+}
+
+function buildJson(items) {
+  return JSON.stringify({
+    tool: "Image Classification and Quality Checker",
+    note: "Educational practice output. Quality values are simple estimates unless set by the user.",
+    exportedAt: new Date().toISOString(),
+    summary: {
+      total: items.length,
+      categories: countBy(items, "category", CATEGORIES, "Unassigned"),
+      quality: countBy(items, "quality", QUALITIES, null)
+    },
+    images: exportRows(items)
+  }, null, 2);
+}
+
+/* PURE-END */
+
+/* ---------- Reading an image file ---------- */
+
+/* Load a file, shrink it, measure sharpness, and make a small thumbnail.
+   Returns { width, height, sharpness, thumb } or throws if the file cannot be read. */
+function analyzeFile(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+
+    img.onload = () => {
+      try {
+        const width = img.naturalWidth;
+        const height = img.naturalHeight;
+        if (!width || !height) throw new Error("empty image");
+
+        // Shrink to a fixed size so the sharpness score is comparable between images
+        const scale = Math.min(1, ANALYSIS_MAX_SIDE / Math.max(width, height));
+        const cw = Math.max(1, Math.round(width * scale));
+        const ch = Math.max(1, Math.round(height * scale));
+        const canvas = document.createElement("canvas");
+        canvas.width = cw;
+        canvas.height = ch;
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
+        ctx.fillStyle = "#fff";            // transparent PNGs get a white background
+        ctx.fillRect(0, 0, cw, ch);
+        ctx.drawImage(img, 0, 0, cw, ch);
+
+        // Convert to gray values (brightness only)
+        const data = ctx.getImageData(0, 0, cw, ch).data;
+        const gray = new Float32Array(cw * ch);
+        for (let i = 0, p = 0; i < gray.length; i++, p += 4) {
+          gray[i] = 0.299 * data[p] + 0.587 * data[p + 1] + 0.114 * data[p + 2];
+        }
+
+        resolve({
+          width, height,
+          sharpness: laplacianVariance(gray, cw, ch),
+          thumb: canvas.toDataURL("image/jpeg", 0.8) // small preview, so many big photos stay light in memory
+        });
+      } catch (err) {
+        reject(err);
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("cannot decode")); };
+    img.src = url;
+  });
+}
+
+/* Handle a list of files, one at a time (keeps memory use low) */
+async function handleFiles(fileList) {
+  const files = Array.from(fileList || []);
+  if (!files.length) return;
+
+  const images = files.filter((f) => f.type.startsWith("image/"));
+  const notImages = files.length - images.length;
+  const failed = [];
+  let duplicates = 0;
+  let added = 0;
+
+  for (let i = 0; i < images.length; i++) {
+    const file = images[i];
+    const key = `${file.name}|${file.size}|${file.lastModified}`;
+    if (state.seen.has(key)) { duplicates++; continue; }
+
+    setStatus(`Reading image ${i + 1} of ${images.length}…`);
+    try {
+      const info = await analyzeFile(file);
+      const item = {
+        id: state.nextId++,
+        file,
+        name: file.name,
+        size: file.size,
+        width: info.width,
+        height: info.height,
+        sharpness: info.sharpness,
+        thumb: info.thumb,
+        category: "",                                              // the user chooses this
+        quality: suggestQuality(info.width, info.height, info.sharpness),
+        qualitySource: "auto",
+        key
+      };
+      state.seen.add(key);
+      state.items.push(item);
+      els.grid.appendChild(createCard(item));
+      added++;
+      renderAll();
+    } catch (err) {
+      failed.push(file.name);
+    }
+  }
+
+  // Final message
+  const parts = [`Added ${added} image${added === 1 ? "" : "s"}.`];
+  if (duplicates) parts.push(`${duplicates} skipped (already added).`);
+  if (notImages) parts.push(`${notImages} skipped (not an image).`);
+  if (failed.length) parts.push(`Could not read: ${failed.join(", ")}.`);
+  setStatus(parts.join(" "), failed.length > 0);
+}
+
+/* ---------- Cards ---------- */
+
+/* Build the card for one image once. Later changes update it in place,
+   so a select keeps its focus while the user edits. */
+function createCard(item) {
+  const card = document.createElement("article");
+  card.className = "card";
+  item.el = card;
+
+  // Thumbnail (click to see the full-size image)
+  const thumbBtn = document.createElement("button");
+  thumbBtn.type = "button";
+  thumbBtn.className = "thumb";
+  thumbBtn.setAttribute("aria-label", `Open ${item.name} full size`);
+  const img = document.createElement("img");
+  img.src = item.thumb;
+  img.alt = `Thumbnail of ${item.name}`;
+  thumbBtn.appendChild(img);
+  thumbBtn.addEventListener("click", () => openViewer(item));
+
+  const body = document.createElement("div");
+  body.className = "card-body";
+
+  const name = document.createElement("div");
+  name.className = "name";
+  name.textContent = item.name;
+  name.title = item.name;
+
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  meta.textContent = `${item.width} × ${item.height} px · ${Math.round(item.size / 1024)} KB · sharpness ${Math.round(item.sharpness)}`;
+
+  // Category select
+  const catField = document.createElement("label");
+  catField.className = "field";
+  catField.append("Category");
+  const catSel = document.createElement("select");
+  catSel.setAttribute("aria-label", `Category for ${item.name}`);
+  catSel.innerHTML = `<option value="">Unassigned</option>` +
+    CATEGORIES.map((c) => `<option value="${c}">${c}</option>`).join("");
+  catSel.value = item.category;
+  catSel.addEventListener("change", () => {
+    item.category = catSel.value;
+    renderAll();
+  });
+  catField.appendChild(catSel);
+
+  // Quality select + badge + note
+  const qualField = document.createElement("label");
+  qualField.className = "field";
+  qualField.append("Quality");
+  const qualSel = document.createElement("select");
+  qualSel.setAttribute("aria-label", `Quality for ${item.name}`);
+  qualSel.innerHTML = QUALITIES.map((q) => `<option value="${q}">${q}</option>`).join("");
+  qualSel.value = item.quality;
+  qualSel.addEventListener("change", () => {
+    item.quality = qualSel.value;
+    item.qualitySource = "manual"; // the user has corrected it
+    renderAll();
+  });
+  qualField.appendChild(qualSel);
+
+  const note = document.createElement("span");
+  note.className = "note";
+
+  const actions = document.createElement("div");
+  actions.className = "card-actions";
+  const badge = document.createElement("span");
+  badge.className = "badge";
+  const removeBtn = document.createElement("button");
+  removeBtn.type = "button";
+  removeBtn.className = "danger";
+  removeBtn.textContent = "Remove";
+  removeBtn.setAttribute("aria-label", `Remove ${item.name}`);
+  removeBtn.addEventListener("click", () => removeItem(item.id));
+  actions.append(badge, removeBtn);
+
+  body.append(name, meta, catField, qualField, note, actions);
+  card.append(thumbBtn, body);
+
+  // Keep references so refreshCard can update the card without rebuilding it
+  item.refs = { qualSel, note, badge };
+  refreshCard(item);
+  return card;
+}
+
+/* Update the parts of a card that depend on the item's quality */
+function refreshCard(item) {
+  item.el.dataset.q = item.quality;
+  item.refs.qualSel.value = item.quality;
+  item.refs.badge.textContent = item.quality;
+  item.refs.note.textContent = item.qualitySource === "auto" ? "Suggested automatically" : "Set by you";
+}
+
+function removeItem(id) {
+  const idx = state.items.findIndex((it) => it.id === id);
+  if (idx === -1) return;
+  const [item] = state.items.splice(idx, 1);
+  state.seen.delete(item.key);
+  item.el.remove();
+  renderAll();
+}
+
+/* ---------- Summary ---------- */
+
+function renderBars(container, counts, total, classFor) {
+  container.innerHTML = "";
+  Object.keys(counts).forEach((label) => {
+    const row = document.createElement("div");
+    row.className = "bar-row";
+
+    const name = document.createElement("span");
+    name.textContent = label;
+
+    const track = document.createElement("div");
+    track.className = "track";
+    const fill = document.createElement("div");
+    fill.className = "fill " + classFor(label);
+    fill.style.width = total ? (counts[label] / total) * 100 + "%" : "0";
+    track.appendChild(fill);
+
+    const count = document.createElement("span");
+    count.className = "count";
+    count.textContent = counts[label];
+
+    row.append(name, track, count);
+    container.appendChild(row);
+  });
+}
+
+function renderAll() {
+  const total = state.items.length;
+  els.totalCount.textContent = total;
+  els.emptyState.style.display = total ? "none" : "block";
+
+  state.items.forEach(refreshCard);
+
+  renderBars(els.catBars, countBy(state.items, "category", CATEGORIES, "Unassigned"), total,
+    (label) => (label === "Unassigned" ? "unassigned" : ""));
+  renderBars(els.qualBars, countBy(state.items, "quality", QUALITIES, null), total,
+    (label) => "q-" + label.replace(/\s/g, ""));
+
+  els.downloadBtn.disabled = total === 0;
+  els.copyBtn.disabled = total === 0;
+  els.clearBtn.disabled = total === 0;
+  updateExport();
+}
+
+/* ---------- Export ---------- */
+
+function currentExportText() {
+  return els.exportFormat.value === "csv" ? buildCsv(state.items) : buildJson(state.items);
+}
+
+function updateExport() {
+  els.preview.textContent = state.items.length ? currentExportText() : "Nothing to export yet.";
+  const unassigned = state.items.filter((it) => !it.category).length;
+  els.exportStatus.textContent = unassigned
+    ? `${unassigned} image${unassigned === 1 ? " has" : "s have"} no category yet. It will export as “Unassigned”.`
+    : "";
+}
+els.exportFormat.addEventListener("change", updateExport);
+
+els.downloadBtn.addEventListener("click", () => {
+  try {
+    const isCsv = els.exportFormat.value === "csv";
+    // The BOM at the start helps Excel read UTF-8 file names correctly
+    const text = (isCsv ? "\uFEFF" : "") + currentExportText();
+    const blob = new Blob([text], { type: isCsv ? "text/csv;charset=utf-8" : "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "image-annotations." + (isCsv ? "csv" : "json");
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    els.exportStatus.textContent = "Download started. If nothing happens, use Copy instead.";
+  } catch (err) {
+    els.exportStatus.textContent = "Download is blocked here. Use Copy instead.";
+  }
+});
+
+els.copyBtn.addEventListener("click", async () => {
+  const text = currentExportText();
+  try {
+    await navigator.clipboard.writeText(text);
+    els.exportStatus.textContent = "Copied.";
+  } catch (err) {
+    // Fallback for browsers that block the clipboard API
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch (e2) { ok = false; }
+    ta.remove();
+    els.exportStatus.textContent = ok ? "Copied." : "Copy is blocked. Open “Preview” and copy the text by hand.";
+  }
+});
+
+/* Two-click confirm for "Clear all" (no pop-up dialogs) */
+let clearTimer = null;
+els.clearBtn.addEventListener("click", () => {
+  if (els.clearBtn.dataset.confirm === "1") {
+    state.items.forEach((it) => it.el.remove());
+    state.items = [];
+    state.seen.clear();
+    resetClearButton();
+    setStatus("All images cleared.");
+    renderAll();
+    return;
+  }
+  els.clearBtn.dataset.confirm = "1";
+  els.clearBtn.textContent = "Click again to confirm";
+  clearTimer = setTimeout(resetClearButton, 3000);
+});
+function resetClearButton() {
+  clearTimeout(clearTimer);
+  els.clearBtn.dataset.confirm = "";
+  els.clearBtn.textContent = "Clear all";
+}
+
+/* ---------- Full-size viewer ---------- */
+let viewerUrl = null;
+
+function openViewer(item) {
+  viewerUrl = URL.createObjectURL(item.file);       // made only while the viewer is open
+  els.viewerImg.src = viewerUrl;
+  els.viewerImg.alt = item.name;
+  els.viewerTitle.textContent = `${item.name} (${item.width} × ${item.height} px)`;
+  els.viewer.showModal();
+}
+function closeViewer() { els.viewer.close(); }
+els.viewerClose.addEventListener("click", closeViewer);
+els.viewer.addEventListener("click", (e) => { if (e.target === els.viewer) closeViewer(); }); // click outside to close
+els.viewer.addEventListener("close", () => {
+  if (viewerUrl) URL.revokeObjectURL(viewerUrl);
+  viewerUrl = null;
+  els.viewerImg.removeAttribute("src");
+});
+
+/* ---------- Upload controls and drag-and-drop ---------- */
+function setStatus(msg, isError = false) {
+  els.status.textContent = msg;
+  els.status.classList.toggle("error", isError);
+}
+
+els.uploadBtn.addEventListener("click", () => els.fileInput.click());
+els.fileInput.addEventListener("change", () => {
+  const files = els.fileInput.files;
+  handleFiles(files).then(() => { els.fileInput.value = ""; }); // allows choosing the same files again
+});
+["dragenter", "dragover"].forEach((ev) =>
+  els.dropzone.addEventListener(ev, (e) => { e.preventDefault(); els.dropzone.classList.add("dragover"); })
+);
+["dragleave", "drop"].forEach((ev) =>
+  els.dropzone.addEventListener(ev, (e) => { e.preventDefault(); els.dropzone.classList.remove("dragover"); })
+);
+els.dropzone.addEventListener("drop", (e) => handleFiles(e.dataTransfer.files));
+
+/* ---------- Start ---------- */
+renderAll();
+</script>
+</body>
+</html>
