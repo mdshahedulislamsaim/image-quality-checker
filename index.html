@@ -74,13 +74,17 @@
     border-radius: 8px; padding: 7px 12px; cursor: pointer;
   }
   button:hover, select:hover { border-color: var(--ink-soft); }
-  button:focus-visible, select:focus-visible, summary:focus-visible {
+  button:focus-visible, select:focus-visible, input:focus-visible, summary:focus-visible {
     outline: 2px solid var(--accent); outline-offset: 2px;
   }
   button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
   button.danger { color: var(--danger); }
   button:disabled { opacity: 0.5; cursor: not-allowed; }
   input[type="file"] { display: none; }
+  input[type="number"] {
+    font: inherit; color: var(--ink); width: 80px;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px;
+  }
   .hint { color: var(--ink-soft); font-size: 0.88rem; margin: 0 0 10px; }
   .btn-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
   .inline-label { display: flex; align-items: center; gap: 6px; color: var(--ink-soft); font-size: 0.9rem; }
@@ -213,7 +217,13 @@
         <h3 class="sub">Quality</h3>
         <div class="bars" id="qualBars"></div>
 
-        <p class="hint" style="margin:0">Quality is suggested from image size and sharpness. It is a rough guide, so check each image and correct it if needed.</p>
+        <div class="btn-row">
+          <label class="inline-label">Blur limit
+            <input type="number" id="blurLimit" min="1" max="1000" step="1" value="30" aria-label="Blur limit">
+          </label>
+          <button type="button" id="blurApply">Apply</button>
+        </div>
+        <p class="hint" style="margin:0">Quality is suggested from image size and sharpness. An image with a sharpness score below the blur limit is suggested as Blurry. Apply only changes labels you have not edited yourself. It is a rough guide, so check each image and correct it if needed.</p>
       </section>
 
       <section class="panel" aria-label="Export">
@@ -267,7 +277,7 @@ const QUALITIES  = ["Clear", "Blurry", "Low Resolution"];
 /* Rules for the automatic quality suggestion */
 const LOW_RES_MIN_SIDE   = 400;     // shorter side below this (px) = Low Resolution
 const LOW_RES_MIN_PIXELS = 250000;  // fewer pixels than this (about 0.25 MP) = Low Resolution
-const BLUR_LIMIT         = 50;      // sharpness score below this = Blurry
+let   blurLimit          = 30;      // sharpness score below this = Blurry (can be changed on the page)
 const ANALYSIS_MAX_SIDE  = 512;     // images are shrunk to this size before measuring sharpness
 
 /* ---------- App state ---------- */
@@ -283,6 +293,7 @@ const els = {
   dropzone: $("dropzone"), uploadBtn: $("uploadBtn"), fileInput: $("fileInput"), status: $("status"),
   grid: $("grid"), emptyState: $("emptyState"),
   totalCount: $("totalCount"), catBars: $("catBars"), qualBars: $("qualBars"),
+  blurLimit: $("blurLimit"), blurApply: $("blurApply"),
   exportFormat: $("exportFormat"), downloadBtn: $("downloadBtn"), copyBtn: $("copyBtn"), clearBtn: $("clearBtn"),
   exportStatus: $("exportStatus"), preview: $("preview"),
   viewer: $("viewer"), viewerTitle: $("viewerTitle"), viewerImg: $("viewerImg"), viewerClose: $("viewerClose")
@@ -293,31 +304,82 @@ const els = {
    ===================================================================== */
 /* PURE-START */
 
-/* Sharpness score: the variance of the Laplacian.
-   For each pixel: (up + down + left + right) - 4 * center.
-   Sharp images have strong edges, so the values vary a lot (high score).
-   Blurry images are smooth, so the values stay near zero (low score). */
-function laplacianVariance(gray, w, h) {
-  if (w < 3 || h < 3) return 0;
-  let sum = 0, sumSq = 0, count = 0;
+/* Value at a percentile (0-100) of a list of numbers, with linear steps between neighbors */
+function percentile(values, p) {
+  const s = values.slice().sort((a, b) => a - b);
+  const pos = (p / 100) * (s.length - 1);
+  const lo = Math.floor(pos), hi = Math.ceil(pos);
+  return s[lo] + (s[hi] - s[lo]) * (pos - lo);
+}
+
+/* Sharpness score. Steps:
+   1. Smooth with a 3x3 average, so camera noise and JPEG grain are not counted as detail.
+   2. Apply the Laplacian: (up + down + left + right) - 4 * center. Edges give big values.
+   3. Cut the picture into up to 8 x 8 blocks and measure how much the values vary in each block.
+   4. Take the 90th percentile of the block values. A photo with a sharp subject and a soft
+      background still scores high, but a picture that is blurry everywhere scores low. */
+function sharpnessScore(gray, w, h) {
+  if (w < 8 || h < 8) return 0;
+
+  // Step 1: 3x3 average for the pixels that have all 8 neighbors
+  const sw = w - 2, sh = h - 2;
+  const smooth = new Float32Array(sw * sh);
   for (let y = 1; y < h - 1; y++) {
     for (let x = 1; x < w - 1; x++) {
       const i = y * w + x;
-      const v = gray[i - 1] + gray[i + 1] + gray[i - w] + gray[i + w] - 4 * gray[i];
-      sum += v;
-      sumSq += v * v;
-      count++;
+      smooth[(y - 1) * sw + (x - 1)] = (
+        gray[i - w - 1] + gray[i - w] + gray[i - w + 1] +
+        gray[i - 1]     + gray[i]     + gray[i + 1] +
+        gray[i + w - 1] + gray[i + w] + gray[i + w + 1]
+      ) / 9;
     }
   }
-  const mean = sum / count;
-  return sumSq / count - mean * mean;
+
+  // Step 2: Laplacian of the smoothed picture
+  const lw = sw - 2, lh = sh - 2;
+  if (lw < 1 || lh < 1) return 0;
+  const lap = new Float32Array(lw * lh);
+  for (let y = 1; y < sh - 1; y++) {
+    for (let x = 1; x < sw - 1; x++) {
+      const i = y * sw + x;
+      lap[(y - 1) * lw + (x - 1)] = smooth[i - 1] + smooth[i + 1] + smooth[i - sw] + smooth[i + sw] - 4 * smooth[i];
+    }
+  }
+
+  // Step 3: variance inside each block (small pictures use fewer, larger blocks)
+  const blocks = Math.max(1, Math.min(8, Math.floor(Math.min(lw, lh) / 16)));
+  const bw = Math.floor(lw / blocks), bh = Math.floor(lh / blocks);
+  const variances = [];
+  for (let by = 0; by < blocks; by++) {
+    for (let bx = 0; bx < blocks; bx++) {
+      let sum = 0, sumSq = 0, count = 0;
+      for (let y = by * bh; y < (by + 1) * bh; y++) {
+        for (let x = bx * bw; x < (bx + 1) * bw; x++) {
+          const v = lap[y * lw + x];
+          sum += v;
+          sumSq += v * v;
+          count++;
+        }
+      }
+      const mean = sum / count;
+      variances.push(sumSq / count - mean * mean);
+    }
+  }
+
+  // Step 4: the 90th percentile of the block values is the score
+  return percentile(variances, 90);
+}
+
+/* Show a score with one decimal when it is small, otherwise as a whole number */
+function formatScore(v) {
+  return v < 10 ? v.toFixed(1) : String(Math.round(v));
 }
 
 /* Suggest a quality label from the ORIGINAL size and the sharpness score.
    Size is checked first, because sharpness is not reliable on tiny images. */
-function suggestQuality(width, height, sharpness) {
+function suggestQuality(width, height, sharpness, limit = blurLimit) {
   if (Math.min(width, height) < LOW_RES_MIN_SIDE || width * height < LOW_RES_MIN_PIXELS) return "Low Resolution";
-  if (sharpness < BLUR_LIMIT) return "Blurry";
+  if (sharpness < limit) return "Blurry";
   return "Clear";
 }
 
@@ -416,7 +478,7 @@ function analyzeFile(file) {
 
         resolve({
           width, height,
-          sharpness: laplacianVariance(gray, cw, ch),
+          sharpness: sharpnessScore(gray, cw, ch),
           thumb: canvas.toDataURL("image/jpeg", 0.8) // small preview, so many big photos stay light in memory
         });
       } catch (err) {
@@ -511,7 +573,7 @@ function createCard(item) {
 
   const meta = document.createElement("div");
   meta.className = "meta";
-  meta.textContent = `${item.width} × ${item.height} px · ${Math.round(item.size / 1024)} KB · sharpness ${Math.round(item.sharpness)}`;
+  meta.textContent = `${item.width} × ${item.height} px · ${Math.round(item.size / 1024)} KB · sharpness ${formatScore(item.sharpness)}`;
 
   // Category select
   const catField = document.createElement("label");
@@ -723,6 +785,25 @@ els.viewer.addEventListener("close", () => {
   if (viewerUrl) URL.revokeObjectURL(viewerUrl);
   viewerUrl = null;
   els.viewerImg.removeAttribute("src");
+});
+
+/* ---------- Blur limit ---------- */
+/* Change the limit and suggest quality again for images the user has not edited */
+els.blurApply.addEventListener("click", () => {
+  const value = Number(els.blurLimit.value);
+  if (!isFinite(value) || value < 1) {
+    setStatus("Enter a blur limit of 1 or more.", true);
+    return;
+  }
+  blurLimit = value;
+  let changed = 0;
+  state.items.forEach((it) => {
+    if (it.qualitySource !== "auto") return;            // keep labels the user set
+    const next = suggestQuality(it.width, it.height, it.sharpness);
+    if (next !== it.quality) { it.quality = next; changed++; }
+  });
+  setStatus(`Blur limit set to ${value}. ${changed} suggestion${changed === 1 ? "" : "s"} changed.`);
+  renderAll();
 });
 
 /* ---------- Upload controls and drag-and-drop ---------- */
